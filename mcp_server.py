@@ -173,8 +173,8 @@ def create_http_app():
         allowed_hosts=[
             "127.0.0.1:*",
             "localhost:*",
-            "yt-transcript.0ruka.dev",
-            "yt-transcript.0ruka.dev:*",
+            "audio-transcript.0ruka.dev",
+            "audio-transcript.0ruka.dev:*",
         ],
         allowed_origins=[
             "https://chatgpt.com",
@@ -189,7 +189,7 @@ def create_http_app():
         transport_security=security,
     )
     app.add_middleware(OAuthBoundaryMiddleware, provider=auth_provider)
-    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "yt-transcript.0ruka.dev"])
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "audio-transcript.0ruka.dev"])
     return app
 
 

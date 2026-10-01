@@ -28,8 +28,10 @@
   Change provider, cost behavior, concurrency, or download behavior only when
   the task calls for it.
 
-- Server display name is Audio Transcript. Preserve the existing hostname, MCP
-  endpoint, OAuth audience/state, scope, and systemd unit names across renames.
+- Server display name is Audio Transcript. The public hostname is
+  `audio-transcript.0ruka.dev`; OAuth issuer and audience use this hostname.
+  Preserve OAuth state, scope, and systemd unit names. A hostname migration
+  requires a new client connection and revocation of grants for the old audience.
 - `transcribe_audio` accepts a host file object via `openai/fileParams`; its schema
   must declare download_url/file_id required and mime_type/file_name optional.
   Use the existing GPT Transcribe pipeline, never the Gemini CLI as a fallback.

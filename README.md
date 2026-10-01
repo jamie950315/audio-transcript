@@ -14,7 +14,7 @@ The REST API and authenticated MCP share the transcription pipeline.
 
 The checkout is `/home/jamie/yt-transcript-API` on Pi5. Both Python services
 use its `venv`. Cloudflare Tunnel exposes
-`https://yt-transcript.0ruka.dev`.
+`https://audio-transcript.0ruka.dev`.
 
 `GET /health` is public. `POST /transcript` and `POST /audio/transcript` require
 `X-API-Key` matching
@@ -26,13 +26,18 @@ add separate full-file MP3 conversion or normalization passes before splitting.
 
 ## Connect ChatGPT
 
-Use the existing connection, refresh its tools, and display it as **Audio Transcript**.
-The endpoint and OAuth identity are unchanged. For a new developer mode connection:
+Create the **Audio Transcript** developer mode connection with:
 
-- MCP URL: `https://yt-transcript.0ruka.dev/mcp`
+- MCP URL: `https://audio-transcript.0ruka.dev/mcp`
 - Authentication: OAuth
 - Client registration: Dynamic Client Registration (DCR)
 - Scope: `transcript:read`
+
+The service migrated from `yt-transcript.0ruka.dev` to `audio-transcript.0ruka.dev`.
+The old connection must be removed and a new connection created because the
+OAuth issuer and resource audience changed. The private password is unchanged.
+Old-audience grants are revoked during migration; client records and password
+configuration remain private and preserved.
 
 On first connection, the service shows a password and consent page. This is
 a single-owner service. It accepts the ChatGPT stable OAuth callback and

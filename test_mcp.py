@@ -87,7 +87,7 @@ class MCPContracts(unittest.TestCase):
     def request(self, path, method="GET", data=None, token=None, headers=None):
         parsed = urlsplit(path)
         path = parsed.path + ("?" + parsed.query if parsed.query else "")
-        request_headers = {"Host": "yt-transcript.0ruka.dev", "CF-Connecting-IP": self.id(), **(headers or {})}
+        request_headers = {"Host": "audio-transcript.0ruka.dev", "CF-Connecting-IP": self.id(), **(headers or {})}
         if token:
             request_headers["Authorization"] = "Bearer " + token
         if isinstance(data, dict):
@@ -317,6 +317,22 @@ class MCPContracts(unittest.TestCase):
         self.assertGreater(provider.rate_limit_retry_after("contract", "one-ip", 1, 60), 0)
         self.assertEqual(provider.rate_limit_retry_after("contract", "fresh-ip", 1, 60), 0)
         self.assertEqual(self.request("/oauth/login", "POST", "x" * 16385)[0], 413)
+
+    def test_previous_hostname_and_oauth_audience_are_rejected(self):
+        old_resource = "https://yt-transcript.0ruka.dev/mcp"
+        self.assertEqual(self.request("/mcp", headers={"Host": "yt-transcript.0ruka.dev"})[0], 400)
+        client = self.client()
+        _, location = self.pending(client, resource=old_resource)
+        query = parse_qs(urlsplit(location).query)
+        self.assertEqual(query["error"], ["invalid_target"])
+        self.assertEqual(query["iss"], [self.auth.ISSUER_URL])
+        _, tokens = self.tokens()
+        token = tokens["access_token"]
+        with self.module.auth_provider.db() as conn:
+            data = json.loads(conn.execute("SELECT data FROM records WHERE kind='access' AND key=?", (self.auth.digest(token),)).fetchone()["data"])
+            data["resource"] = old_resource
+            conn.execute("UPDATE records SET data=? WHERE kind='access' AND key=?", (json.dumps(data), self.auth.digest(token)))
+        self.assertEqual(self.rpc("tools/list", token)[0], 401)
 
     def test_actual_mcp_payloads_have_one_copy(self):
         _, tokens = self.tokens()

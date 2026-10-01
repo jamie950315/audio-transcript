@@ -27,7 +27,7 @@ from starlette.middleware.base import BaseHTTPMiddleware
 from starlette.requests import Request
 from starlette.responses import HTMLResponse, JSONResponse, RedirectResponse
 
-PUBLIC_URL = "https://yt-transcript.0ruka.dev"
+PUBLIC_URL = "https://audio-transcript.0ruka.dev"
 ISSUER_URL = PUBLIC_URL
 RESOURCE_URL = PUBLIC_URL + "/mcp"
 SCOPE = "transcript:read"
