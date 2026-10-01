@@ -230,9 +230,9 @@ class OwnerOAuthProvider:
             client = await self.get_client(data["client_id"])
             name = html.escape(client.client_name or "ChatGPT")
             page = f"""<!doctype html><html lang="en"><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1"><title>YouTube Transcript · Sign in</title>
+<meta name="viewport" content="width=device-width, initial-scale=1"><title>Audio Transcript · Sign in</title>
 <style>body{{font:16px system-ui;background:#f5f5f5;color:#222;margin:0;padding:48px 20px}}main{{max-width:420px;margin:auto;background:white;padding:32px;border-radius:16px}}h1{{font-size:24px}}label{{display:block;margin:24px 0 8px}}input,button{{box-sizing:border-box;width:100%;padding:12px;font:inherit;border-radius:8px;border:1px solid #aaa}}button{{margin-top:16px;background:#222;color:white;cursor:pointer}}small{{display:block;line-height:1.6;color:#555;margin-top:20px}}</style>
-<main><h1>YouTube Transcript</h1><p>Allow <strong>{name}</strong> to retrieve video transcripts using your service.</p>
+<main><h1>Audio Transcript</h1><p>Allow <strong>{name}</strong> to transcribe uploaded audio and retrieve YouTube transcripts using your service.</p>
 <form method="post" action="/oauth/login"><input type="hidden" name="request" value="{html.escape(pending)}"><input type="hidden" name="csrf" value="{csrf}">
 <label for="password">Private access password</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
 <button type="submit">Sign in and allow access</button></form><small>Access: transcript:read<br>Return to: chatgpt.com<br>Audio transcription may use your configured OpenRouter credits.</small></main></html>"""

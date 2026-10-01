@@ -26,13 +26,17 @@ CALLBACK = "https://chatgpt.com/connector_platform_oauth_redirect"
 
 class FixtureAPI(BaseHTTPRequestHandler):
     calls = 0
+    last_params = None
 
     def do_POST(self):
         type(self).calls += 1
         params = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+        type(self).last_params = params
         segments = [{"text": MARKER, "start": 0.0, "duration": 1.0}]
         text = "1\n00:00:00,000 --> 00:00:01,000\n" + MARKER if params["format"] == "srt" else MARKER
         data = {"status": "ok", "video_id": "fixture1234", "title": "Fixture", "language": "en", "needs_translation": False, "segment_count": 1, "segments": segments, "transcript": text}
+        if self.path == "/audio/transcript":
+            data.update(status="transcribed", source="audio", file_id=params["file"]["file_id"], file_name=params["file"].get("file_name", ""), duration=1, timestamp_accuracy="approximate")
         body = json.dumps(data).encode()
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
@@ -60,6 +64,7 @@ class MCPContracts(unittest.TestCase):
         cls.backend_thread = threading.Thread(target=cls.backend.serve_forever, daemon=True)
         cls.backend_thread.start()
         mcp_server.LOCAL_TRANSCRIPT_URL = f"http://127.0.0.1:{cls.backend.server_port}/transcript"
+        mcp_server.LOCAL_AUDIO_URL = f"http://127.0.0.1:{cls.backend.server_port}/audio/transcript"
         mcp_server.API_KEY = "fixture-key"
         cls.server = uvicorn.Server(uvicorn.Config(mcp_server.create_http_app(), host="127.0.0.1", port=0, log_level="critical", access_log=False))
         cls.thread = threading.Thread(target=cls.server.run, daemon=True)
@@ -318,7 +323,7 @@ class MCPContracts(unittest.TestCase):
         token = tokens["access_token"]
         status, _, tools = self.rpc("tools/list", token)
         self.assertEqual(status, 200)
-        tool = tools["result"]["tools"][0]
+        tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "get_youtube_transcript")
         self.assertEqual(tool["inputSchema"]["properties"]["format"]["enum"], ["text", "json", "srt"])
         for format in ("text", "json", "srt"):
             status, _, result = self.rpc("tools/call", token, {"name": "get_youtube_transcript", "arguments": {"url": "fixture1234", "format": format}})
@@ -334,6 +339,32 @@ class MCPContracts(unittest.TestCase):
                 self.assertIn(MARKER, result["content"][0]["text"])
         before = FixtureAPI.calls
         status, _, result = self.rpc("tools/call", token, {"name": "get_youtube_transcript", "arguments": {"url": "fixture1234", "format": "invalid"}})
+        self.assertTrue(result["result"]["isError"])
+        self.assertEqual(FixtureAPI.calls, before)
+
+    def test_audio_attachment_schema_and_single_copy_output(self):
+        _, tokens = self.tokens()
+        token = tokens["access_token"]
+        _, _, tools = self.rpc("tools/list", token)
+        tool = next(tool for tool in tools["result"]["tools"] if tool["name"] == "transcribe_audio")
+        self.assertEqual(tool["_meta"]["openai/fileParams"], ["file"])
+        schema = tool["inputSchema"]
+        file_schema = schema["properties"]["file"]
+        if "$ref" in file_schema:
+            file_schema = schema["$defs"][file_schema["$ref"].rsplit("/", 1)[1]]
+        self.assertEqual(set(file_schema["properties"]), {"download_url", "file_id", "file_name", "mime_type"})
+        self.assertEqual(set(file_schema["required"]), {"download_url", "file_id"})
+        for format in ("text", "json", "srt"):
+            file = {"download_url": "https://files.example/audio?private-signature", "file_id": "fixture-file"}
+            _, _, result = self.rpc("tools/call", token, {"name": "transcribe_audio", "arguments": {"file": file, "language": "en", "format": format}})
+            result = result["result"]
+            self.assertFalse(result.get("isError", False), result)
+            self.assertEqual(json.dumps(result).count(MARKER), 1)
+            self.assertEqual(result["structuredContent"]["file_id"], "fixture-file")
+            self.assertNotIn("private-signature", json.dumps(result))
+            self.assertEqual(FixtureAPI.last_params["language"], "en")
+        before = FixtureAPI.calls
+        _, _, result = self.rpc("tools/call", token, {"name": "transcribe_audio", "arguments": {"file": {"download_url": "https://files.example/a"}}})
         self.assertTrue(result["result"]["isError"])
         self.assertEqual(FixtureAPI.calls, before)
 

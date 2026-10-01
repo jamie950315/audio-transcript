@@ -1,8 +1,8 @@
-# YouTube Transcript API and MCP
+# Audio Transcript API and MCP
 
-Extract public YouTube captions, with OpenRouter audio transcription when
-captions are unavailable. The REST API and authenticated MCP use the same
-transcription service.
+Transcribe uploaded audio using OpenRouter `openai/gpt-transcribe`, and extract
+public YouTube captions with the same model when captions are unavailable.
+The REST API and authenticated MCP share the transcription pipeline.
 
 ## Services
 
@@ -16,7 +16,8 @@ The checkout is `/home/jamie/yt-transcript-API` on Pi5. Both Python services
 use its `venv`. Cloudflare Tunnel exposes
 `https://yt-transcript.0ruka.dev`.
 
-`GET /health` is public. `POST /transcript` requires `X-API-Key` matching
+`GET /health` is public. `POST /transcript` and `POST /audio/transcript` require
+`X-API-Key` matching
 `CCSEARCH_API_KEY` in the private `.env`. `OPENROUTER_API_KEY` is used only
 by the audio transcription pipeline. Audio chunks remain 120 seconds with
 up to 16 concurrent requests. The downloader keeps the native audio format;
@@ -25,7 +26,8 @@ add separate full-file MP3 conversion or normalization passes before splitting.
 
 ## Connect ChatGPT
 
-Create a developer mode connection with:
+Use the existing connection, refresh its tools, and display it as **Audio Transcript**.
+The endpoint and OAuth identity are unchanged. For a new developer mode connection:
 
 - MCP URL: `https://yt-transcript.0ruka.dev/mcp`
 - Authentication: OAuth
@@ -76,6 +78,37 @@ venv/bin/python mcp_auth.py --revoke-all
 
 Keep `.env`, `.oauth/`, and credential backups out of Git.
 
+## Uploaded audio
+
+`transcribe_audio(file, language="auto", timestamps=True, format="text")` accepts
+a ChatGPT attachment using `_meta["openai/fileParams"] = ["file"]`. The host
+provides a file object with required `download_url` and `file_id` strings;
+`mime_type` and `file_name` are optional strings. No local filesystem path or
+widget is required. [Official file input reference](https://developers.openai.com/plugins/reference).
+
+Supported files: MP3, WAV, M4A, OGG, FLAC, AAC, AIFF, WMA, WebM, and Opus.
+The service bounds uploads to 256 MiB, two hours, and a 60-second download.
+It validates every redirect, permits public HTTPS on port 443 only, and pins
+the connection to a validated public address while verifying the original
+TLS hostname. ffmpeg excludes network protocols and playlist demuxers.
+
+Attachments are downloaded into a private temporary directory and removed
+after success or failure. Audio chunks are sent to the configured OpenRouter
+provider for transcription; provider retention is governed by that provider.
+Signed download URLs are excluded from tool output and download errors.
+No transcript is returned if any chunk fails.
+
+Language is auto-detected when `language="auto"`; use a two-letter ISO-639-1
+hint such as `zh`, `en`, `ja`, or `ko`. The tool transcribes speech without
+translation or speaker identification. GPT Transcribe returns text; segment
+times and SRT timestamps are approximate, distributed within each chunk.
+The response reports `timestamp_accuracy="approximate"`. The original Gemini
+voice-transcription CLI skill remains separate.
+
+Example in ChatGPT: upload a recording, select Audio Transcript, and ask
+"Transcribe this audio in its original language." Existing YouTube requests
+continue to use `get_youtube_transcript`.
+
 ## MCP output
 
 `get_youtube_transcript(url, lang="zh-Hant", timestamps=True, format="text")`
@@ -87,8 +120,9 @@ supports exactly `text`, `json`, and `srt`:
 | `json` | Short description | Video metadata and timed segments |
 | `srt` | SRT subtitles | Video metadata |
 
-Each result includes the transcript content once. The REST API response schema
-is unchanged.
+Both tools support these formats and return the transcript content once.
+Uploaded audio returns file metadata instead of video metadata. The existing
+YouTube REST response schema is unchanged.
 
 ## Routing and maintenance
 
@@ -99,7 +133,8 @@ In `/etc/cloudflared/config.yml`, routes for this hostname must send `/mcp`,
 OAuth discovery and login will fail if only `/mcp` is routed to the MCP service.
 
 The MCP systemd unit requires the transcript API. After code changes, restart
-`yt-transcript-mcp.service`. Validate Cloudflare ingress before restarting the
+`yt-transcript-mcp.service`; also restart `yt-transcript.service` when the API
+changes. Validate Cloudflare ingress before restarting the
 shared tunnel if routing changes.
 
 ## Verification
@@ -117,11 +152,14 @@ or OpenRouter.
 For audio pipeline changes, also run:
 
 ```sh
-venv/bin/python -m unittest -v test_transcription test_mcp
+venv/bin/python -m unittest -v test_transcription test_audio_input test_mcp
 ```
 
 The audio tests use real ffmpeg with synthetic AAC input and fixture provider
 responses. They verify one encoding pass, ordered chunk assembly, output audio
 format, duration validation, and rejection of partial results after failures.
+Attachment tests cover the real REST/MCP HTTP flow, language hints, file input
+schema, private-address rejection, pinned TLS, redirects, size bounds, expired
+links, temporary-file cleanup, and playlist rejection.
 Live audio transcription tests consume OpenRouter credits; confirm a budget
 before starting a new benchmark.

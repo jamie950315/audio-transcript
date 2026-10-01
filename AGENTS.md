@@ -22,8 +22,21 @@
 - OAuth routing shares a Cloudflare Tunnel with other services. Preserve other
   ingress entries and validate configuration before a tunnel restart.
 - Audio preparation must encode downloaded native audio only once, segmenting
-  during that pass. Audio changes: run `venv/bin/python -m unittest -v test_transcription test_mcp`.
+  during that pass. Audio changes: run `venv/bin/python -m unittest -v test_transcription test_audio_input test_mcp`.
   The ffmpeg fixtures replace provider calls and must never consume API credits.
 - Audio transcription remains 120-second chunks and 16 concurrent requests.
   Change provider, cost behavior, concurrency, or download behavior only when
   the task calls for it.
+
+- Server display name is Audio Transcript. Preserve the existing hostname, MCP
+  endpoint, OAuth audience/state, scope, and systemd unit names across renames.
+- `transcribe_audio` accepts a host file object via `openai/fileParams`; its schema
+  must declare download_url/file_id required and mime_type/file_name optional.
+  Use the existing GPT Transcribe pipeline, never the Gemini CLI as a fallback.
+- Attachment downloads must validate public HTTPS addresses and every redirect,
+  pin the validated address with normal TLS hostname checks, enforce size and
+  duration bounds, and clean private temporary files on success and failure.
+  Keep signed URLs out of errors/results. ffmpeg must reject network protocols
+  and playlist demuxers. Never return a partial transcript after a chunk failure.
+- Uploaded audio timestamps are approximate; do not claim word alignment,
+  speaker identification, translation, or detected language metadata in auto mode.

@@ -1,5 +1,5 @@
 """
-YouTube Transcript API Server
+Audio Transcript API Server
 FastAPI service wrapping yt-dlp + youtube-transcript-api for subtitle extraction,
 with OpenRouter GPT Transcribe fallback for audio transcription.
 """
@@ -18,10 +18,12 @@ import urllib.error
 import xml.etree.ElementTree as ET
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor, as_completed
+from typing import Literal
 
 from fastapi import FastAPI, Header, HTTPException, Request
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel
+from audio_input import AudioFileInput, AudioInputError, MAX_AUDIO_SECONDS, MEDIA_FORMATS, audio_name, download_audio
 
 import yt_dlp
 
@@ -74,7 +76,7 @@ log = logging.getLogger("yt-transcript")
 
 # ── FastAPI App ──────────────────────────────────────────────────────────────
 
-app = FastAPI(title="YouTube Transcript API", docs_url=None, redoc_url=None)
+app = FastAPI(title="Audio Transcript API", docs_url=None, redoc_url=None)
 
 
 @app.exception_handler(HTTPException)
@@ -94,6 +96,13 @@ class TranscriptRequest(BaseModel):
     lang: str = "zh-Hant"
     timestamps: bool = False
     format: str = "text"
+
+
+class AudioTranscriptRequest(BaseModel):
+    file: AudioFileInput
+    language: str = "auto"
+    timestamps: bool = True
+    format: Literal["text", "json", "srt"] = "text"
 
 
 # ── Video ID Extraction ─────────────────────────────────────────────────────
@@ -275,12 +284,14 @@ def segments_to_srt(segs: list[dict]) -> str:
 
 # ── Audio Transcription (OpenRouter GPT Transcribe) ──────────────────────────
 
-def _openrouter_transcribe(audio_b64: str, fmt: str = "mp3") -> str:
+def _openrouter_transcribe(audio_b64: str, fmt: str = "mp3", language: str = "auto") -> str:
     payload = {
         "model": TRANSCRIPTION_MODEL,
         "input_audio": {"data": audio_b64, "format": fmt},
         "temperature": 0,
     }
+    if language != "auto":
+        payload["language"] = language
     req = urllib.request.Request(
         OPENROUTER_TRANSCRIPTION_URL,
         data=json.dumps(payload).encode(),
@@ -319,7 +330,8 @@ def _openrouter_transcribe(audio_b64: str, fmt: str = "mp3") -> str:
 def _get_duration(path: Path) -> float:
     result = subprocess.run(
         [
-            "ffprobe", "-v", "error",
+            "ffprobe", "-v", "error", "-protocol_whitelist", "file,pipe",
+            "-format_whitelist", MEDIA_FORMATS,
             "-show_entries", "format=duration",
             "-of", "default=noprint_wrappers=1:nokey=1",
             str(path),
@@ -327,6 +339,7 @@ def _get_duration(path: Path) -> float:
         capture_output=True,
         text=True,
         check=True,
+        timeout=30,
     )
     try:
         duration = float(result.stdout.strip())
@@ -355,7 +368,7 @@ def _text_to_segments(text: str, start_offset: float, total_dur: float) -> list[
     ]
 
 
-def _transcribe_audio_file(audio_path: Path) -> list[dict]:
+def _transcribe_audio_file(audio_path: Path, language: str = "auto") -> list[dict]:
     started = time.monotonic()
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
@@ -364,7 +377,8 @@ def _transcribe_audio_file(audio_path: Path) -> list[dict]:
         # Decode the downloaded audio and encode mono 16 kHz MP3 only once.
         # Segment during that same pass instead of re-encoding the full file.
         encode = [
-            "ffmpeg", "-y", "-i", str(audio_path), "-vn",
+            "ffmpeg", "-y", "-protocol_whitelist", "file,pipe",
+            "-format_whitelist", MEDIA_FORMATS, "-i", str(audio_path), "-vn",
             "-ac", "1", "-ar", "16000", "-b:a", "48k",
         ]
 
@@ -372,11 +386,11 @@ def _transcribe_audio_file(audio_path: Path) -> list[dict]:
         # A 120 s source commonly probes as ~120.02 s after MP3 encoding.
         if duration <= TRANSCRIPTION_CHUNK_SECONDS + 0.5:
             compressed = tmp / "normalized.mp3"
-            subprocess.run(encode + [str(compressed)], capture_output=True, check=True)
+            subprocess.run(encode + [str(compressed)], capture_output=True, check=True, timeout=120)
             log.info("Audio preparation: %.2fs source, 1 chunk, %.3fs elapsed", duration, time.monotonic() - started)
             b64 = base64.b64encode(compressed.read_bytes()).decode()
             transcription_started = time.monotonic()
-            text = _openrouter_transcribe(b64)
+            text = _openrouter_transcribe(b64) if language == "auto" else _openrouter_transcribe(b64, language=language)
             log.info("Audio transcription: 1 chunk, %.3fs elapsed", time.monotonic() - transcription_started)
             return _text_to_segments(text, 0, duration)
 
@@ -394,6 +408,7 @@ def _transcribe_audio_file(audio_path: Path) -> list[dict]:
             ],
             capture_output=True,
             check=True,
+            timeout=120,
         )
         chunks = sorted(chunk_dir.glob("chunk_*.mp3"))
         if not chunks:
@@ -414,7 +429,7 @@ def _transcribe_audio_file(audio_path: Path) -> list[dict]:
             futures = {}
             for i, chunk in enumerate(chunks):
                 b64 = base64.b64encode(chunk.read_bytes()).decode()
-                futures[pool.submit(_openrouter_transcribe, b64)] = i
+                futures[pool.submit(_openrouter_transcribe, b64, **({"language": language} if language != "auto" else {}))] = i
 
             for future in as_completed(futures):
                 idx = futures[future]
@@ -634,6 +649,41 @@ def fetch_subtitles_pipeline(video_id: str, target_lang: str) -> dict:
 @app.get("/health")
 def health():
     return {"status": "ok"}
+
+
+@app.post("/audio/transcript")
+def get_audio_transcript(req: AudioTranscriptRequest, x_api_key: str | None = Header(default=None)):
+    if not VALID_API_KEY or x_api_key != VALID_API_KEY:
+        raise HTTPException(401, detail={"status": "error", "message": "Invalid API key"})
+    if req.language != "auto" and not re.fullmatch(r"[a-z]{2}", req.language):
+        raise HTTPException(400, detail="Language must be auto or a two-letter ISO-639-1 code, such as zh, en, ja, or ko.")
+    if not OPENROUTER_KEY:
+        raise HTTPException(500, detail="OPENROUTER_API_KEY is not configured")
+    try:
+        name = audio_name(req.file)
+        with tempfile.TemporaryDirectory(prefix="audio-transcript-") as tmpdir:
+            audio = Path(tmpdir) / "input.audio"
+            download_audio(req.file, audio)
+            duration = _get_duration(audio)
+            if duration > MAX_AUDIO_SECONDS:
+                raise AudioInputError("Audio attachment exceeds the two-hour duration limit.")
+            segments = _transcribe_audio_file(audio, language=req.language)
+    except AudioInputError as exc:
+        raise HTTPException(400, detail=str(exc)) from None
+    except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
+        raise HTTPException(400, detail="Audio could not be decoded within the processing limit. Attach a supported audio file.") from None
+    except Exception:
+        # Do not expose attachment URLs, paths, transcripts, or provider bodies.
+        log.error("Uploaded audio transcription failed; no partial transcript returned")
+        raise HTTPException(502, detail="Audio transcription failed. No partial transcript was returned.") from None
+    transcript = (segments_to_text(segments, req.timestamps) if req.format == "text"
+                  else segments_to_srt(segments) if req.format == "srt" else "")
+    return {
+        "status": "transcribed", "source": "audio", "file_id": req.file.file_id,
+        "file_name": name, "language": req.language, "duration": round(duration, 3),
+        "timestamp_accuracy": "approximate", "segment_count": len(segments),
+        "segments": segments, "transcript": transcript,
+    }
 
 
 @app.post("/transcript")
