@@ -35,7 +35,7 @@ ACCESS_SECONDS = 3600
 REFRESH_SECONDS = 30 * 86400
 LOGIN_SECONDS = 600
 CODE_SECONDS = 120
-CALLBACK_ORIGIN = "https://chatgpt.com"
+CALLBACK_ORIGINS = ("https://chatgpt.com", "https://claude.ai")
 RATE_WINDOW_SECONDS = 600
 PASSWORD_MAX_FAILURES = 10
 
@@ -46,9 +46,13 @@ def digest(value: str) -> str:
 
 def allowed_callback(value: str) -> bool:
     uri = urlsplit(value)
+    origin = uri.scheme + "://" + uri.netloc
+    if uri.query or uri.fragment:
+        return False
+    if origin == "https://claude.ai":
+        return uri.path == "/api/mcp/auth_callback"
     return (
-        uri.scheme + "://" + uri.netloc == CALLBACK_ORIGIN
-        and not uri.query and not uri.fragment
+        origin == "https://chatgpt.com"
         and (uri.path == "/connector_platform_oauth_redirect"
              or re.fullmatch(r"/connector/oauth/[A-Za-z0-9_-]+", uri.path) is not None)
     )
@@ -136,7 +140,7 @@ class OwnerOAuthProvider:
 
     async def register_client(self, client_info):
         if not client_info.redirect_uris or not all(allowed_callback(str(uri)) for uri in client_info.redirect_uris):
-            raise RegistrationError("invalid_redirect_uri", "Only ChatGPT OAuth callbacks are allowed.")
+            raise RegistrationError("invalid_redirect_uri", "Only trusted ChatGPT and Claude OAuth callbacks are allowed.")
         with self.db() as conn:
             if conn.execute("SELECT COUNT(*) FROM records WHERE kind='client'").fetchone()[0] >= 200:
                 raise RegistrationError("invalid_client_metadata", "Client registration limit reached.")
@@ -220,7 +224,7 @@ class OwnerOAuthProvider:
             pending = request.query_params.get("request", "")
             data = self.get("pending", pending)
             if not data:
-                return HTMLResponse("Authorization request expired. Reconnect from ChatGPT.", status_code=400)
+                return HTMLResponse("Authorization request expired. Reconnect from your MCP client.", status_code=400)
             csrf = secrets.token_urlsafe(32)
             data["csrf"] = digest(csrf)
             with self.db() as conn:
@@ -228,14 +232,15 @@ class OwnerOAuthProvider:
                 conn.execute("UPDATE records SET data=? WHERE kind='pending' AND key=? AND expires>?",
                              (json.dumps(data), digest(pending), time.time()))
             client = await self.get_client(data["client_id"])
-            name = html.escape(client.client_name or "ChatGPT")
+            name = html.escape(client.client_name or "OAuth client")
+            return_host = html.escape(urlsplit(data["params"]["redirect_uri"]).hostname or "")
             page = f"""<!doctype html><html lang="en"><meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1"><title>Audio Transcript · Sign in</title>
 <style>body{{font:16px system-ui;background:#f5f5f5;color:#222;margin:0;padding:48px 20px}}main{{max-width:420px;margin:auto;background:white;padding:32px;border-radius:16px}}h1{{font-size:24px}}label{{display:block;margin:24px 0 8px}}input,button{{box-sizing:border-box;width:100%;padding:12px;font:inherit;border-radius:8px;border:1px solid #aaa}}button{{margin-top:16px;background:#222;color:white;cursor:pointer}}small{{display:block;line-height:1.6;color:#555;margin-top:20px}}</style>
 <main><h1>Audio Transcript</h1><p>Allow <strong>{name}</strong> to transcribe uploaded audio and retrieve YouTube transcripts using your service.</p>
 <form method="post" action="/oauth/login"><input type="hidden" name="request" value="{html.escape(pending)}"><input type="hidden" name="csrf" value="{csrf}">
 <label for="password">Private access password</label><input id="password" name="password" type="password" autocomplete="current-password" required autofocus>
-<button type="submit">Sign in and allow access</button></form><small>Access: transcript:read<br>Return to: chatgpt.com<br>Audio transcription may use your configured OpenRouter credits.</small></main></html>"""
+<button type="submit">Sign in and allow access</button></form><small>Access: transcript:read<br>Return to: {return_host}<br>Audio transcription may use your configured OpenRouter credits.</small></main></html>"""
             response = HTMLResponse(page)
             response.set_cookie("yt_oauth_csrf", csrf, max_age=LOGIN_SECONDS, path="/oauth/login", secure=True, httponly=True, samesite="lax")
             return response
@@ -330,7 +335,7 @@ class OAuthBoundaryMiddleware(BaseHTTPMiddleware):
             response.headers["Referrer-Policy"] = "same-origin" if path == "/oauth/login" else "no-referrer"
             response.headers["X-Content-Type-Options"] = "nosniff"
             # Browsers also apply form-action to the POST's cross-origin redirect.
-            response.headers["Content-Security-Policy"] = f"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' {CALLBACK_ORIGIN}; frame-ancestors 'none'; base-uri 'none'"
+            response.headers["Content-Security-Policy"] = f"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' {' '.join(CALLBACK_ORIGINS)}; frame-ancestors 'none'; base-uri 'none'"
         return response
 
 

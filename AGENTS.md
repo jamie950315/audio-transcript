@@ -4,13 +4,15 @@
   credential backups, or runtime data.
 - The live checkout is `/home/jamie/yt-transcript-API` on Pi5. The REST API binds
   to `127.0.0.1:8889`; MCP and OAuth bind to `127.0.0.1:8894`.
-- MCP is a single-owner OAuth service for ChatGPT. Preserve PKCE S256,
+- MCP is a single-owner OAuth service for ChatGPT and hosted Claude apps. Preserve PKCE S256,
   `transcript:read`, the exact resource audience, allowed callbacks, issuer
   identification, single-use codes, refresh rotation/replay protection, and
   private durable state. Missing login configuration must fail startup.
 - Login pages must use `Referrer-Policy: same-origin` so browser form POSTs
   retain their Origin. Continue rejecting missing, null, and foreign origins.
-- Login CSP must allow the trusted ChatGPT callback origin in `form-action`:
+- Accept only the existing ChatGPT callbacks and the exact hosted Claude callback
+  `https://claude.ai/api/mcp/auth_callback`; reject other paths, origins, and query/fragment variations.
+- Login CSP must allow the trusted ChatGPT and Claude callback origins in `form-action`:
   browsers can enforce it across the POST's redirect. Count only valid-form
   wrong passwords toward the password limit, and clear failures on success.
 - Do not reuse the REST API key as an OAuth login password or expose it to clients.

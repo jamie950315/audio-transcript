@@ -139,7 +139,7 @@ def get_youtube_transcript(
 @mcp.tool(
     name="transcribe_audio", title="Transcribe Audio File",
     description=(
-        "Transcribe an audio file uploaded to ChatGPT using OpenRouter openai/gpt-transcribe. "
+        "Transcribe an audio file using OpenRouter openai/gpt-transcribe. "
         "Pass the host-provided file object. Supports MP3, WAV, M4A, OGG, FLAC, AAC, AIFF, WMA, "
         "WebM, and Opus, up to 256 MiB and two hours. Use language='auto' for automatic detection "
         "or an ISO-639-1 hint such as zh, en, ja, or ko. Returns text, JSON segments, or SRT. "
@@ -179,6 +179,7 @@ def create_http_app():
         allowed_origins=[
             "https://chatgpt.com",
             "https://chat.openai.com",
+            "https://claude.ai",
             PUBLIC_URL,
         ],
     )

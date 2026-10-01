@@ -24,9 +24,10 @@ up to 16 concurrent requests. The downloader keeps the native audio format;
 ffmpeg encodes mono 16 kHz, 48 kbps MP3 and segments it in one pass. Do not
 add separate full-file MP3 conversion or normalization passes before splitting.
 
-## Connect ChatGPT
+## Connect ChatGPT and Claude
 
-Create the **Audio Transcript** developer mode connection with:
+Create the **Audio Transcript** developer mode connection in ChatGPT, or add a
+custom connector under Customize > Connectors in Claude, with:
 
 - MCP URL: `https://audio-transcript.0ruka.dev/mcp`
 - Authentication: OAuth
@@ -40,16 +41,20 @@ Old-audience grants are revoked during migration; client records and password
 configuration remain private and preserved.
 
 On first connection, the service shows a password and consent page. This is
-a single-owner service. It accepts the ChatGPT stable OAuth callback and
-ChatGPT connection-specific callbacks. Other client redirect URLs are rejected.
+a single-owner service. It accepts the ChatGPT stable OAuth callback,
+ChatGPT connection-specific callbacks, and the exact hosted Claude callback
+`https://claude.ai/api/mcp/auth_callback`. Other client redirect URLs are rejected.
+[Claude OAuth callback reference](https://claude.com/docs/connectors/building/authentication).
+In Claude, select **Sign in now** and **Register automatically**. The same
+private password is used; the login page displays the actual return hostname.
 
 The login page allows form submission to this service and redirection to
-`https://chatgpt.com` in its Content Security Policy. Password throttling counts
+`https://chatgpt.com` and `https://claude.ai` in its Content Security Policy. Password throttling counts
 only wrong passwords after Origin and CSRF validation: ten failures per address
 within ten minutes. Successful login clears that failure counter. A separate
 limit of 60 registration, authorization and login requests per address within
 ten minutes bounds public traffic. A `429` response reports the remaining
-window in `Retry-After`. Reconnect from ChatGPT after a request expires or has
+window in `Retry-After`. Reconnect from your MCP client after a request expires or has
 already been used.
 
 The server publishes OAuth authorization metadata and protected resource
@@ -126,7 +131,10 @@ supports exactly `text`, `json`, and `srt`:
 | `srt` | SRT subtitles | Video metadata |
 
 Both tools support these formats and return the transcript content once.
-Uploaded audio returns file metadata instead of video metadata. The existing
+Uploaded audio returns file metadata instead of video metadata. Claude can call
+both tools after connecting; audio input still requires a host-provided HTTPS
+download URL and file ID. Do not pass a local Claude sandbox path as a download URL.
+The existing
 YouTube REST response schema is unchanged.
 
 ## Routing and maintenance

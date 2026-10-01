@@ -22,6 +22,7 @@ import uvicorn
 PASSWORD = "test-only-password-" + secrets.token_hex(24)
 MARKER = "unique-transcript-marker"
 CALLBACK = "https://chatgpt.com/connector_platform_oauth_redirect"
+CLAUDE_CALLBACK = "https://claude.ai/api/mcp/auth_callback"
 
 
 class FixtureAPI(BaseHTTPRequestHandler):
@@ -109,15 +110,15 @@ class MCPContracts(unittest.TestCase):
             value = raw
         return status, response_headers, value
 
-    def client(self, auth_method="none"):
-        status, _, client = self.request("/register", "POST", {"redirect_uris": [CALLBACK], "client_name": "Contract test", "token_endpoint_auth_method": auth_method, "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"], "scope": self.auth.SCOPE})
+    def client(self, auth_method="none", callback=CALLBACK, client_name="Contract test"):
+        status, _, client = self.request("/register", "POST", {"redirect_uris": [callback], "client_name": client_name, "token_endpoint_auth_method": auth_method, "grant_types": ["authorization_code", "refresh_token"], "response_types": ["code"], "scope": self.auth.SCOPE})
         self.assertEqual(status, 201, client)
         return client
 
-    def pending(self, client, resource=None):
+    def pending(self, client, resource=None, callback=CALLBACK):
         verifier = secrets.token_urlsafe(32)
         challenge = base64.urlsafe_b64encode(hashlib.sha256(verifier.encode()).digest()).decode().rstrip("=")
-        params = {"client_id": client["client_id"], "redirect_uri": CALLBACK, "response_type": "code", "scope": self.auth.SCOPE, "state": "test-state", "resource": resource or self.auth.RESOURCE_URL, "code_challenge": challenge, "code_challenge_method": "S256"}
+        params = {"client_id": client["client_id"], "redirect_uri": callback, "response_type": "code", "scope": self.auth.SCOPE, "state": "test-state", "resource": resource or self.auth.RESOURCE_URL, "code_challenge": challenge, "code_challenge_method": "S256"}
         status, headers, value = self.request("/authorize?" + urlencode(params))
         self.assertEqual(status, 302, value)
         return verifier, headers["location"]
@@ -126,7 +127,7 @@ class MCPContracts(unittest.TestCase):
         status, headers, page = self.request(url)
         self.assertEqual(status, 200, page)
         self.assertEqual(headers["referrer-policy"], "same-origin")
-        self.assertIn("form-action 'self' https://chatgpt.com;", headers["content-security-policy"])
+        self.assertIn("form-action 'self' https://chatgpt.com https://claude.ai;", headers["content-security-policy"])
         pending = re.search(r'name="request" value="([^"]+)"', page)[1]
         csrf = re.search(r'name="csrf" value="([^"]+)"', page)[1]
         cookie = headers["set-cookie"].split(";", 1)[0]
@@ -143,8 +144,8 @@ class MCPContracts(unittest.TestCase):
         self.assertEqual(query["iss"], [self.auth.ISSUER_URL])
         return client, verifier, query["code"][0]
 
-    def exchange(self, client, verifier, code, resource=None):
-        form = {"grant_type": "authorization_code", "client_id": client["client_id"], "redirect_uri": CALLBACK, "code": code, "code_verifier": verifier, "resource": resource or self.auth.RESOURCE_URL}
+    def exchange(self, client, verifier, code, resource=None, callback=CALLBACK):
+        form = {"grant_type": "authorization_code", "client_id": client["client_id"], "redirect_uri": callback, "code": code, "code_verifier": verifier, "resource": resource or self.auth.RESOURCE_URL}
         headers = {}
         if client["token_endpoint_auth_method"] == "client_secret_post":
             form["client_secret"] = client["client_secret"]
@@ -185,6 +186,37 @@ class MCPContracts(unittest.TestCase):
         query = parse_qs(urlsplit(location).query)
         self.assertEqual(query["error"], ["invalid_target"])
         self.assertEqual(query["iss"], [self.auth.ISSUER_URL])
+
+    def test_claude_callback_registration_login_and_tools(self):
+        client = self.client(callback=CLAUDE_CALLBACK, client_name="Claude")
+        verifier, url = self.pending(client, callback=CLAUDE_CALLBACK)
+        status, _, page = self.request(url)
+        self.assertEqual(status, 200)
+        self.assertIn("Return to: claude.ai", page)
+        status, headers, value = self.consent(url)
+        self.assertEqual(status, 303, value)
+        redirect = urlsplit(headers["location"])
+        self.assertEqual(redirect.scheme + "://" + redirect.netloc + redirect.path, CLAUDE_CALLBACK)
+        query = parse_qs(redirect.query)
+        self.assertEqual(query["state"], ["test-state"])
+        self.assertEqual(query["iss"], [self.auth.ISSUER_URL])
+        status, _, tokens = self.exchange(client, verifier, query["code"][0], callback=CLAUDE_CALLBACK)
+        self.assertEqual(status, 200, tokens)
+        status, _, tools = self.rpc("tools/list", tokens["access_token"])
+        self.assertEqual(status, 200)
+        self.assertEqual({tool["name"] for tool in tools["result"]["tools"]},
+                         {"get_youtube_transcript", "transcribe_audio"})
+
+    def test_claude_callback_rejects_other_paths_and_origins(self):
+        for callback in (
+            "https://claude.ai/callback", "https://claude.ai/api/mcp/auth_callback/",
+            "https://claude.ai/api/mcp/auth_callback?next=evil", "https://claude.ai/api/mcp/auth_callback#fragment",
+            "https://claude.ai.evil.example/api/mcp/auth_callback", "https://evil.example@claude.ai/api/mcp/auth_callback",
+            "http://claude.ai/api/mcp/auth_callback", "https://claude.ai:444/api/mcp/auth_callback",
+        ):
+            with self.subTest(callback=callback):
+                status, _, value = self.request("/register", "POST", {"redirect_uris": [callback]})
+                self.assertEqual(status, 400, value)
 
     def test_password_origin_and_csrf(self):
         client = self.client()
