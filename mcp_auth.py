@@ -9,6 +9,7 @@ import hashlib
 import hmac
 import html
 import json
+import math
 import re
 import secrets
 import sqlite3
@@ -34,6 +35,9 @@ ACCESS_SECONDS = 3600
 REFRESH_SECONDS = 30 * 86400
 LOGIN_SECONDS = 600
 CODE_SECONDS = 120
+CALLBACK_ORIGIN = "https://chatgpt.com"
+RATE_WINDOW_SECONDS = 600
+PASSWORD_MAX_FAILURES = 10
 
 
 def digest(value: str) -> str:
@@ -43,10 +47,21 @@ def digest(value: str) -> str:
 def allowed_callback(value: str) -> bool:
     uri = urlsplit(value)
     return (
-        uri.scheme == "https" and uri.netloc == "chatgpt.com"
+        uri.scheme + "://" + uri.netloc == CALLBACK_ORIGIN
         and not uri.query and not uri.fragment
         and (uri.path == "/connector_platform_oauth_redirect"
              or re.fullmatch(r"/connector/oauth/[A-Za-z0-9_-]+", uri.path) is not None)
+    )
+
+
+def client_address(request: Request) -> str:
+    return request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "local")
+
+
+def authentication_throttled(retry_after: int) -> JSONResponse:
+    return JSONResponse(
+        {"error": "temporarily_unavailable", "error_description": "Too many authentication requests. Try again later."},
+        status_code=429, headers={"Retry-After": str(retry_after), "Cache-Control": "no-store"},
     )
 
 
@@ -102,6 +117,18 @@ class OwnerOAuthProvider:
                 (bucket, digest(key), now, now - seconds, now - seconds),
             ).fetchone()
         return row["count"] <= maximum
+
+    def rate_limit_retry_after(self, bucket, key, maximum, seconds):
+        with self.db() as conn:
+            row = conn.execute("SELECT started,count FROM attempts WHERE bucket=? AND key=?",
+                               (bucket, digest(key))).fetchone()
+        if not row or row["count"] < maximum:
+            return 0
+        return max(0, math.ceil(row["started"] + seconds - time.time()))
+
+    def clear_rate_limit(self, bucket, key):
+        with self.db() as conn:
+            conn.execute("DELETE FROM attempts WHERE bucket=? AND key=?", (bucket, digest(key)))
 
     async def get_client(self, client_id):
         data = self.get("client", client_id)
@@ -220,7 +247,12 @@ class OwnerOAuthProvider:
         data = self.get("pending", pending)
         if not data or not csrf or not hmac.compare_digest(csrf, request.cookies.get("yt_oauth_csrf", "")) or not hmac.compare_digest(data.get("csrf", ""), digest(csrf)):
             return JSONResponse({"error": "invalid_request", "error_description": "Authorization request expired or invalid."}, status_code=400)
+        ip = client_address(request)
+        retry_after = self.rate_limit_retry_after("password_failures", ip, PASSWORD_MAX_FAILURES, RATE_WINDOW_SECONDS)
+        if retry_after:
+            return authentication_throttled(retry_after)
         if not self.password_matches(str(form.get("password", ""))):
+            self.rate_limit("password_failures", ip, PASSWORD_MAX_FAILURES, RATE_WINDOW_SECONDS)
             return HTMLResponse("Incorrect password. Go back and try again.", status_code=401)
         params = AuthorizationParams.model_validate(data["params"])
         code = secrets.token_urlsafe(32)
@@ -233,6 +265,7 @@ class OwnerOAuthProvider:
                 redirect_uri_provided_explicitly=params.redirect_uri_provided_explicitly,
                 resource=RESOURCE_URL, subject="owner", expires_at=time.time() + CODE_SECONDS)
             self.put(conn, "code", code, authorization.model_dump(mode="json", exclude={"code"}), authorization.expires_at)
+        self.clear_rate_limit("password_failures", ip)
         response = RedirectResponse(construct_redirect_uri(str(params.redirect_uri), code=code, state=params.state, iss=ISSUER_URL), status_code=303)
         response.delete_cookie("yt_oauth_csrf", path="/oauth/login", secure=True, httponly=True, samesite="lax")
         return response
@@ -248,12 +281,10 @@ class OAuthBoundaryMiddleware(BaseHTTPMiddleware):
         path = request.url.path
         is_auth = path in {"/authorize", "/token", "/register", "/revoke", "/oauth/login"}
         if is_auth:
-            ip = request.headers.get("cf-connecting-ip") or (request.client.host if request.client else "local")
+            ip = client_address(request)
             if path in {"/register", "/authorize", "/oauth/login"}:
-                bucket = "login" if path == "/oauth/login" and request.method == "POST" else "public"
-                maximum = 10 if bucket == "login" else 60
-                if not self.provider.rate_limit(bucket, ip, maximum, 600):
-                    return JSONResponse({"error": "temporarily_unavailable", "error_description": "Too many authentication requests. Try again later."}, status_code=429, headers={"Retry-After": "600", "Cache-Control": "no-store"})
+                if not self.provider.rate_limit("public", ip, 60, RATE_WINDOW_SECONDS):
+                    return authentication_throttled(self.provider.rate_limit_retry_after("public", ip, 60, RATE_WINDOW_SECONDS))
             if request.method == "POST":
                 body = bytearray()
                 async for chunk in request.stream():
@@ -298,7 +329,8 @@ class OAuthBoundaryMiddleware(BaseHTTPMiddleware):
             # Retain the same-origin login signal without sending cross-site referrers.
             response.headers["Referrer-Policy"] = "same-origin" if path == "/oauth/login" else "no-referrer"
             response.headers["X-Content-Type-Options"] = "nosniff"
-            response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
+            # Browsers also apply form-action to the POST's cross-origin redirect.
+            response.headers["Content-Security-Policy"] = f"default-src 'none'; style-src 'unsafe-inline'; form-action 'self' {CALLBACK_ORIGIN}; frame-ancestors 'none'; base-uri 'none'"
         return response
 
 

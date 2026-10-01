@@ -121,6 +121,7 @@ class MCPContracts(unittest.TestCase):
         status, headers, page = self.request(url)
         self.assertEqual(status, 200, page)
         self.assertEqual(headers["referrer-policy"], "same-origin")
+        self.assertIn("form-action 'self' https://chatgpt.com;", headers["content-security-policy"])
         pending = re.search(r'name="request" value="([^"]+)"', page)[1]
         csrf = re.search(r'name="csrf" value="([^"]+)"', page)[1]
         cookie = headers["set-cookie"].split(";", 1)[0]
@@ -187,6 +188,47 @@ class MCPContracts(unittest.TestCase):
         self.assertEqual(self.consent(url, origin="https://evil.example")[0], 403)
         self.assertEqual(self.consent(url, origin="null")[0], 403)
         self.assertEqual(self.consent(url, csrf_override="bad")[0], 400)
+        with self.module.auth_provider.db() as conn:
+            count = conn.execute("SELECT count FROM attempts WHERE bucket='password_failures' AND key=?",
+                                 (self.auth.digest(self.id()),)).fetchone()[0]
+        self.assertEqual(count, 1)
+
+    def test_successful_logins_do_not_exhaust_password_limit(self):
+        provider = self.module.auth_provider
+        # Old counters included correct passwords and invalid forms. They must
+        # not become failed-password counters when upgrading the live server.
+        with provider.db() as conn:
+            conn.execute("INSERT INTO attempts VALUES ('login', ?, ?, 11)", (self.auth.digest(self.id()), time.time()))
+        client = self.client()
+        _, url = self.pending(client)
+        self.assertEqual(self.consent(url, password="incorrect")[0], 401)
+        self.assertEqual(self.consent(url)[0], 303)
+        with provider.db() as conn:
+            self.assertIsNone(conn.execute("SELECT count FROM attempts WHERE bucket='password_failures' AND key=?",
+                                          (self.auth.digest(self.id()),)).fetchone())
+        for _ in range(11):
+            _, url = self.pending(client)
+            self.assertEqual(self.consent(url)[0], 303)
+
+    def test_failed_password_limit_and_expiry(self):
+        provider = self.module.auth_provider
+        client = self.client()
+        _, url = self.pending(client)
+        for _ in range(self.auth.PASSWORD_MAX_FAILURES):
+            self.assertEqual(self.consent(url, password="incorrect")[0], 401)
+        with provider.db() as conn:
+            conn.execute("UPDATE attempts SET started=? WHERE bucket='password_failures' AND key=?",
+                         (time.time() - 450, self.auth.digest(self.id())))
+        status, headers, error = self.consent(url)
+        self.assertEqual(status, 429, error)
+        self.assertGreater(int(headers["retry-after"]), 0)
+        self.assertLessEqual(int(headers["retry-after"]), 150)
+        with provider.db() as conn:
+            self.assertEqual(conn.execute("SELECT count FROM attempts WHERE bucket='password_failures' AND key=?",
+                                         (self.auth.digest(self.id()),)).fetchone()[0], self.auth.PASSWORD_MAX_FAILURES)
+            conn.execute("UPDATE attempts SET started=? WHERE bucket='password_failures' AND key=?",
+                         (time.time() - 601, self.auth.digest(self.id())))
+        self.assertEqual(self.consent(url)[0], 303)
 
     def test_pkce_resource_and_code_replay(self):
         client, verifier, code = self.grant()
@@ -267,6 +309,8 @@ class MCPContracts(unittest.TestCase):
         self.assertTrue(provider.rate_limit("contract", "one-ip", 1, 60))
         self.assertFalse(provider.rate_limit("contract", "one-ip", 1, 60))
         self.assertTrue(provider.rate_limit("contract", "other-ip", 1, 60))
+        self.assertGreater(provider.rate_limit_retry_after("contract", "one-ip", 1, 60), 0)
+        self.assertEqual(provider.rate_limit_retry_after("contract", "fresh-ip", 1, 60), 0)
         self.assertEqual(self.request("/oauth/login", "POST", "x" * 16385)[0], 413)
 
     def test_actual_mcp_payloads_have_one_copy(self):

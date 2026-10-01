@@ -10,6 +10,9 @@
   private durable state. Missing login configuration must fail startup.
 - Login pages must use `Referrer-Policy: same-origin` so browser form POSTs
   retain their Origin. Continue rejecting missing, null, and foreign origins.
+- Login CSP must allow the trusted ChatGPT callback origin in `form-action`:
+  browsers can enforce it across the POST's redirect. Count only valid-form
+  wrong passwords toward the password limit, and clear failures on success.
 - Do not reuse the REST API key as an OAuth login password or expose it to clients.
 - Preserve the REST response schema. MCP returns one copy of transcript text or
   timed segments; metadata may be structured separately.

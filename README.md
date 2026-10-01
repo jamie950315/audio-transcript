@@ -34,6 +34,15 @@ On first connection, the service shows a password and consent page. This is
 a single-owner service. It accepts the ChatGPT stable OAuth callback and
 ChatGPT connection-specific callbacks. Other client redirect URLs are rejected.
 
+The login page allows form submission to this service and redirection to
+`https://chatgpt.com` in its Content Security Policy. Password throttling counts
+only wrong passwords after Origin and CSRF validation: ten failures per address
+within ten minutes. Successful login clears that failure counter. A separate
+limit of 60 registration, authorization and login requests per address within
+ten minutes bounds public traffic. A `429` response reports the remaining
+window in `Retry-After`. Reconnect from ChatGPT after a request expires or has
+already been used.
+
 The server publishes OAuth authorization metadata and protected resource
 metadata. PKCE S256 and an exact MCP resource audience are required.
 Authorization responses include the issuer for RFC 9207 validation.
