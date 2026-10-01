@@ -294,7 +294,9 @@ class OAuthBoundaryMiddleware(BaseHTTPMiddleware):
                 response.headers["location"] = construct_redirect_uri(response.headers["location"], iss=ISSUER_URL)
         if is_auth:
             response.headers["Cache-Control"] = "no-store"
-            response.headers["Referrer-Policy"] = "no-referrer"
+            # no-referrer makes browsers send Origin: null for form POSTs.
+            # Retain the same-origin login signal without sending cross-site referrers.
+            response.headers["Referrer-Policy"] = "same-origin" if path == "/oauth/login" else "no-referrer"
             response.headers["X-Content-Type-Options"] = "nosniff"
             response.headers["Content-Security-Policy"] = "default-src 'none'; style-src 'unsafe-inline'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'"
         return response

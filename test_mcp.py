@@ -120,6 +120,7 @@ class MCPContracts(unittest.TestCase):
     def consent(self, url, password=PASSWORD, origin=None, csrf_override=None):
         status, headers, page = self.request(url)
         self.assertEqual(status, 200, page)
+        self.assertEqual(headers["referrer-policy"], "same-origin")
         pending = re.search(r'name="request" value="([^"]+)"', page)[1]
         csrf = re.search(r'name="csrf" value="([^"]+)"', page)[1]
         cookie = headers["set-cookie"].split(";", 1)[0]
@@ -184,6 +185,7 @@ class MCPContracts(unittest.TestCase):
         _, url = self.pending(client)
         self.assertEqual(self.consent(url, password="incorrect")[0], 401)
         self.assertEqual(self.consent(url, origin="https://evil.example")[0], 403)
+        self.assertEqual(self.consent(url, origin="null")[0], 403)
         self.assertEqual(self.consent(url, csrf_override="bad")[0], 400)
 
     def test_pkce_resource_and_code_replay(self):

@@ -8,6 +8,8 @@
   `transcript:read`, the exact resource audience, allowed callbacks, issuer
   identification, single-use codes, refresh rotation/replay protection, and
   private durable state. Missing login configuration must fail startup.
+- Login pages must use `Referrer-Policy: same-origin` so browser form POSTs
+  retain their Origin. Continue rejecting missing, null, and foreign origins.
 - Do not reuse the REST API key as an OAuth login password or expose it to clients.
 - Preserve the REST response schema. MCP returns one copy of transcript text or
   timed segments; metadata may be structured separately.
