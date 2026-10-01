@@ -51,6 +51,15 @@ OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
 GEMINI_MODEL = "google/gemini-3-flash-preview"
 CHUNK_MB_MAX = 18
 
+# YouTube now enforces PO Tokens for some playback/subtitle requests.
+# The bgutil provider listens on localhost:4416 and yt-dlp discovers its plugin
+# from this virtualenv. mweb + Node gives a stable path through GVS and JS
+# challenge solving.
+YTDLP_YOUTUBE_OPTS = {
+    "js_runtimes": {"node": {"path": None}},
+    "extractor_args": {"youtube": {"player_client": ["mweb"]}},
+}
+
 ZH_CODES = frozenset({"zh-Hant", "zh-TW", "zh-Hans", "zh-CN", "zh"})
 
 logging.basicConfig(
@@ -474,6 +483,7 @@ def _download_and_transcribe(url: str) -> list[dict]:
         tmp = Path(tmpdir)
 
         ydl_opts = {
+            **YTDLP_YOUTUBE_OPTS,
             "format": "worstaudio/worst",
             "outtmpl": str(tmp / "%(id)s.%(ext)s"),
             "quiet": True,
@@ -508,7 +518,13 @@ def fetch_subtitles_pipeline(video_id: str, target_lang: str) -> dict:
     url = f"https://www.youtube.com/watch?v={video_id}"
 
     # Extract video info
-    ydl_opts = {"skip_download": True, "quiet": True, "no_warnings": True, "noplaylist": True}
+    ydl_opts = {
+        **YTDLP_YOUTUBE_OPTS,
+        "skip_download": True,
+        "quiet": True,
+        "no_warnings": True,
+        "noplaylist": True,
+    }
     try:
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
             info = ydl.extract_info(url, download=False)

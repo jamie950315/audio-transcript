@@ -1,4 +1,7 @@
 fastapi>=0.115.0
 uvicorn[standard]>=0.30.0
-yt-dlp>=2025.1.0
+yt-dlp>=2026.8.19
 youtube-transcript-api>=1.0.0
+yt-dlp-ejs>=0.8.0
+bgutil-ytdlp-pot-provider>=2.0.0
+mcp>=2.2.0
