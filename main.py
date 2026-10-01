@@ -1,7 +1,7 @@
 """
 YouTube Transcript API Server
 FastAPI service wrapping yt-dlp + youtube-transcript-api for subtitle extraction,
-with OpenRouter Gemini fallback for audio transcription.
+with OpenRouter GPT Transcribe fallback for audio transcription.
 """
 
 import os
@@ -47,9 +47,10 @@ _load_dotenv()
 
 VALID_API_KEY = os.environ.get("CCSEARCH_API_KEY", "")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
-OPENROUTER_URL = "https://openrouter.ai/api/v1/chat/completions"
-GEMINI_MODEL = "google/gemini-3-flash-preview"
-CHUNK_MB_MAX = 18
+OPENROUTER_TRANSCRIPTION_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
+TRANSCRIPTION_MODEL = "openai/gpt-transcribe"
+TRANSCRIPTION_CHUNK_SECONDS = 120
+TRANSCRIPTION_MAX_WORKERS = 8
 
 # YouTube now enforces PO Tokens for some playback/subtitle requests.
 # The bgutil provider listens on localhost:4416 and yt-dlp discovers its plugin
@@ -270,32 +271,16 @@ def segments_to_srt(segs: list[dict]) -> str:
     return "\n".join(lines)
 
 
-# ── Audio Transcription (OpenRouter Gemini) ──────────────────────────────────
+# ── Audio Transcription (OpenRouter GPT Transcribe) ──────────────────────────
 
-def _gemini_transcribe(audio_b64: str, fmt: str = "mp3") -> str:
+def _openrouter_transcribe(audio_b64: str, fmt: str = "mp3") -> str:
     payload = {
-        "model": GEMINI_MODEL,
-        "messages": [
-            {
-                "role": "user",
-                "content": [
-                    {
-                        "type": "text",
-                        "text": (
-                            "Transcribe this audio accurately. "
-                            "Output ONLY the transcription text, nothing else."
-                        ),
-                    },
-                    {
-                        "type": "input_audio",
-                        "input_audio": {"data": audio_b64, "format": fmt},
-                    },
-                ],
-            }
-        ],
+        "model": TRANSCRIPTION_MODEL,
+        "input_audio": {"data": audio_b64, "format": fmt},
+        "temperature": 0,
     }
     req = urllib.request.Request(
-        OPENROUTER_URL,
+        OPENROUTER_TRANSCRIPTION_URL,
         data=json.dumps(payload).encode(),
         headers={
             "Authorization": f"Bearer {OPENROUTER_KEY}",
@@ -303,19 +288,31 @@ def _gemini_transcribe(audio_b64: str, fmt: str = "mp3") -> str:
         },
         method="POST",
     )
-    try:
-        with urllib.request.urlopen(req, timeout=180) as resp:
-            result = json.loads(resp.read().decode())
-    except urllib.error.HTTPError as e:
-        body = e.read().decode(errors="replace")[:300]
-        raise RuntimeError(f"OpenRouter HTTP {e.code}: {body}") from e
-    except urllib.error.URLError as e:
-        raise RuntimeError(f"Network error: {e.reason}") from e
 
-    try:
-        return result["choices"][0]["message"]["content"].strip()
-    except (KeyError, IndexError) as e:
-        raise RuntimeError(f"Unexpected API response: {json.dumps(result)[:300]}") from e
+    last_error: Exception | None = None
+    for attempt in range(3):
+        try:
+            with urllib.request.urlopen(req, timeout=120) as resp:
+                result = json.loads(resp.read().decode())
+            text = result.get("text", "")
+            if text.strip():
+                return text.strip()
+            raise RuntimeError(f"Empty transcription response: {json.dumps(result)[:300]}")
+        except urllib.error.HTTPError as e:
+            body = e.read().decode(errors="replace")[:500]
+            last_error = RuntimeError(f"OpenRouter HTTP {e.code}: {body}")
+            if e.code not in (408, 409, 429, 500, 502, 503, 504):
+                raise last_error from e
+        except urllib.error.URLError as e:
+            last_error = RuntimeError(f"Network error: {e.reason}")
+        except Exception as e:
+            last_error = e
+
+        if attempt < 2:
+            import time
+            time.sleep(2 ** attempt)
+
+    raise RuntimeError(f"GPT Transcribe failed after 3 attempts: {last_error}")
 
 
 def _get_duration(path: Path) -> float:
@@ -354,46 +351,41 @@ def _text_to_segments(text: str, start_offset: float, total_dur: float) -> list[
 
 
 def _transcribe_audio_file(audio_path: Path) -> list[dict]:
-    size_mb = audio_path.stat().st_size / 1024 / 1024
-
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
-        # Compress to mono MP3
-        if size_mb > CHUNK_MB_MAX or audio_path.suffix != ".mp3":
-            compressed = tmp / "compressed.mp3"
-            subprocess.run(
-                [
-                    "ffmpeg", "-y", "-i", str(audio_path),
-                    "-ac", "1", "-ar", "16000", "-b:a", "48k",
-                    str(compressed),
-                ],
-                capture_output=True,
-                check=True,
-            )
-            work_file = compressed
-        else:
-            work_file = audio_path
+        # Normalize once so every request is small and consistent.
+        compressed = tmp / "normalized.mp3"
+        subprocess.run(
+            [
+                "ffmpeg", "-y", "-i", str(audio_path),
+                "-ac", "1", "-ar", "16000", "-b:a", "48k",
+                str(compressed),
+            ],
+            capture_output=True,
+            check=True,
+        )
 
-        size_mb = work_file.stat().st_size / 1024 / 1024
+        duration = _get_duration(compressed)
 
-        if size_mb <= CHUNK_MB_MAX:
-            audio_b64 = base64.b64encode(work_file.read_bytes()).decode()
-            text = _gemini_transcribe(audio_b64)
-            duration = _get_duration(work_file)
+        # Allow a small encoder-padding tolerance around the nominal boundary.
+        # A 120 s source commonly probes as ~120.02 s after MP3 encoding.
+        if duration <= TRANSCRIPTION_CHUNK_SECONDS + 0.5:
+            b64 = base64.b64encode(compressed.read_bytes()).decode()
+            text = _openrouter_transcribe(b64)
             return _text_to_segments(text, 0, duration)
 
-        # Split into chunks
-        duration = _get_duration(work_file)
-        n_chunks = max(2, int(size_mb / CHUNK_MB_MAX) + 1)
-        chunk_sec = max(30, int(duration / n_chunks) + 1)
-
+        # Long-form video: fixed 120 s chunks. This stays well inside
+        # OpenRouter's practical transcription processing window and allows
+        # parallel requests without large payloads.
         chunk_dir = tmp / "chunks"
         chunk_dir.mkdir()
         subprocess.run(
             [
-                "ffmpeg", "-y", "-i", str(work_file),
-                "-f", "segment", "-segment_time", str(chunk_sec),
+                "ffmpeg", "-y", "-i", str(compressed),
+                "-f", "segment",
+                "-segment_time", str(TRANSCRIPTION_CHUNK_SECONDS),
+                "-reset_timestamps", "1",
                 "-ac", "1", "-ar", "16000", "-b:a", "48k",
                 str(chunk_dir / "chunk_%04d.mp3"),
             ],
@@ -402,24 +394,37 @@ def _transcribe_audio_file(audio_path: Path) -> list[dict]:
         )
         chunks = sorted(chunk_dir.glob("chunk_*.mp3"))
 
+        # ffmpeg may emit a sub-second trailing MP3 containing only encoder
+        # padding when the source length lands exactly on a segment boundary.
+        if len(chunks) > 1 and _get_duration(chunks[-1]) < 0.5:
+            log.info("Ignoring %.3fs encoder-padding tail chunk", _get_duration(chunks[-1]))
+            chunks = chunks[:-1]
+
         results: dict[int, str] = {}
-        with ThreadPoolExecutor(max_workers=min(len(chunks), 8)) as pool:
+        errors: dict[int, str] = {}
+        workers = min(len(chunks), TRANSCRIPTION_MAX_WORKERS)
+        with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
             for i, chunk in enumerate(chunks):
                 b64 = base64.b64encode(chunk.read_bytes()).decode()
-                futures[pool.submit(_gemini_transcribe, b64)] = i
+                futures[pool.submit(_openrouter_transcribe, b64)] = i
+
             for future in as_completed(futures):
                 idx = futures[future]
                 try:
                     results[idx] = future.result()
                 except Exception as e:
-                    log.error("Chunk %d transcription failed: %s", idx, e)
-                    results[idx] = ""
+                    errors[idx] = str(e)
+                    log.error("GPT Transcribe chunk %d failed: %s", idx, e)
+
+        if errors:
+            failed = ", ".join(f"{i}: {msg}" for i, msg in sorted(errors.items()))
+            raise RuntimeError(f"GPT Transcribe failed for chunks: {failed[:1000]}")
 
         all_segments: list[dict] = []
-        for i in sorted(results):
-            chunk_start = i * chunk_sec
-            chunk_dur = min(chunk_sec, duration - chunk_start)
+        for i in range(len(chunks)):
+            chunk_start = i * TRANSCRIPTION_CHUNK_SECONDS
+            chunk_dur = min(TRANSCRIPTION_CHUNK_SECONDS, max(0, duration - chunk_start))
             all_segments.extend(_text_to_segments(results[i], chunk_start, chunk_dur))
         return all_segments
 
@@ -598,7 +603,7 @@ def fetch_subtitles_pipeline(video_id: str, target_lang: str) -> dict:
     except Exception as e:
         log.warning("youtube-transcript-api failed: %s", e)
 
-    # Priority 7: Audio download + Gemini transcription
+    # Priority 7: Audio download + OpenRouter GPT Transcribe
     if not OPENROUTER_KEY:
         raise HTTPException(
             500,
@@ -608,7 +613,7 @@ def fetch_subtitles_pipeline(video_id: str, target_lang: str) -> dict:
             },
         )
 
-    log.info("Falling back to audio transcription for %s...", video_id)
+    log.info("Falling back to OpenRouter GPT Transcribe for %s...", video_id)
     try:
         segs = _download_and_transcribe(url)
         return {
