@@ -50,7 +50,7 @@ OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_TRANSCRIPTION_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 TRANSCRIPTION_MODEL = "openai/gpt-transcribe"
 TRANSCRIPTION_CHUNK_SECONDS = 120
-TRANSCRIPTION_MAX_WORKERS = 8
+TRANSCRIPTION_MAX_WORKERS = 16
 
 # YouTube now enforces PO Tokens for some playback/subtitle requests.
 # The bgutil provider listens on localhost:4416 and yt-dlp discovers its plugin
