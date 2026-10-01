@@ -21,6 +21,9 @@
   a live smoke test; do not run a new audio benchmark for wrapper changes.
 - OAuth routing shares a Cloudflare Tunnel with other services. Preserve other
   ingress entries and validate configuration before a tunnel restart.
+- Audio preparation must encode downloaded native audio only once, segmenting
+  during that pass. Audio changes: run `venv/bin/python -m unittest -v test_transcription test_mcp`.
+  The ffmpeg fixtures replace provider calls and must never consume API credits.
 - Audio transcription remains 120-second chunks and 16 concurrent requests.
   Change provider, cost behavior, concurrency, or download behavior only when
   the task calls for it.

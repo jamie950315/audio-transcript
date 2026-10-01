@@ -9,7 +9,9 @@ import re
 import json
 import base64
 import logging
+import math
 import tempfile
+import time
 import subprocess
 import urllib.request
 import urllib.error
@@ -309,7 +311,6 @@ def _openrouter_transcribe(audio_b64: str, fmt: str = "mp3") -> str:
             last_error = e
 
         if attempt < 2:
-            import time
             time.sleep(2 ** attempt)
 
     raise RuntimeError(f"GPT Transcribe failed after 3 attempts: {last_error}")
@@ -325,11 +326,15 @@ def _get_duration(path: Path) -> float:
         ],
         capture_output=True,
         text=True,
+        check=True,
     )
     try:
-        return float(result.stdout.strip())
-    except ValueError:
-        return 300.0
+        duration = float(result.stdout.strip())
+    except ValueError as exc:
+        raise RuntimeError("Cannot determine audio duration") from exc
+    if not math.isfinite(duration) or duration <= 0:
+        raise RuntimeError("Cannot determine audio duration")
+    return duration
 
 
 def _text_to_segments(text: str, start_offset: float, total_dur: float) -> list[dict]:
@@ -351,48 +356,48 @@ def _text_to_segments(text: str, start_offset: float, total_dur: float) -> list[
 
 
 def _transcribe_audio_file(audio_path: Path) -> list[dict]:
+    started = time.monotonic()
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp = Path(tmpdir)
 
-        # Normalize once so every request is small and consistent.
-        compressed = tmp / "normalized.mp3"
-        subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(audio_path),
-                "-ac", "1", "-ar", "16000", "-b:a", "48k",
-                str(compressed),
-            ],
-            capture_output=True,
-            check=True,
-        )
-
-        duration = _get_duration(compressed)
+        duration = _get_duration(audio_path)
+        # Decode the downloaded audio and encode mono 16 kHz MP3 only once.
+        # Segment during that same pass instead of re-encoding the full file.
+        encode = [
+            "ffmpeg", "-y", "-i", str(audio_path), "-vn",
+            "-ac", "1", "-ar", "16000", "-b:a", "48k",
+        ]
 
         # Allow a small encoder-padding tolerance around the nominal boundary.
         # A 120 s source commonly probes as ~120.02 s after MP3 encoding.
         if duration <= TRANSCRIPTION_CHUNK_SECONDS + 0.5:
+            compressed = tmp / "normalized.mp3"
+            subprocess.run(encode + [str(compressed)], capture_output=True, check=True)
+            log.info("Audio preparation: %.2fs source, 1 chunk, %.3fs elapsed", duration, time.monotonic() - started)
             b64 = base64.b64encode(compressed.read_bytes()).decode()
+            transcription_started = time.monotonic()
             text = _openrouter_transcribe(b64)
+            log.info("Audio transcription: 1 chunk, %.3fs elapsed", time.monotonic() - transcription_started)
             return _text_to_segments(text, 0, duration)
 
-        # Long-form video: fixed 120 s chunks. This stays well inside
+        # Long-form video: fixed-size chunks. This stays well inside
         # OpenRouter's practical transcription processing window and allows
         # parallel requests without large payloads.
         chunk_dir = tmp / "chunks"
         chunk_dir.mkdir()
         subprocess.run(
-            [
-                "ffmpeg", "-y", "-i", str(compressed),
+            encode + [
                 "-f", "segment",
                 "-segment_time", str(TRANSCRIPTION_CHUNK_SECONDS),
                 "-reset_timestamps", "1",
-                "-ac", "1", "-ar", "16000", "-b:a", "48k",
                 str(chunk_dir / "chunk_%04d.mp3"),
             ],
             capture_output=True,
             check=True,
         )
         chunks = sorted(chunk_dir.glob("chunk_*.mp3"))
+        if not chunks:
+            raise RuntimeError("Audio segmentation produced no chunks")
 
         # ffmpeg may emit a sub-second trailing MP3 containing only encoder
         # padding when the source length lands exactly on a segment boundary.
@@ -403,6 +408,8 @@ def _transcribe_audio_file(audio_path: Path) -> list[dict]:
         results: dict[int, str] = {}
         errors: dict[int, str] = {}
         workers = min(len(chunks), TRANSCRIPTION_MAX_WORKERS)
+        log.info("Audio preparation: %.2fs source, %d chunks, %.3fs elapsed", duration, len(chunks), time.monotonic() - started)
+        transcription_started = time.monotonic()
         with ThreadPoolExecutor(max_workers=workers) as pool:
             futures = {}
             for i, chunk in enumerate(chunks):
@@ -420,6 +427,8 @@ def _transcribe_audio_file(audio_path: Path) -> list[dict]:
         if errors:
             failed = ", ".join(f"{i}: {msg}" for i, msg in sorted(errors.items()))
             raise RuntimeError(f"GPT Transcribe failed for chunks: {failed[:1000]}")
+
+        log.info("Audio transcription: %d chunks, %d workers, %.3fs elapsed", len(chunks), workers, time.monotonic() - transcription_started)
 
         all_segments: list[dict] = []
         for i in range(len(chunks)):
@@ -494,25 +503,14 @@ def _download_and_transcribe(url: str) -> list[dict]:
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
-            "postprocessors": [
-                {
-                    "key": "FFmpegExtractAudio",
-                    "preferredcodec": "mp3",
-                    "preferredquality": "48",
-                }
-            ],
         }
         with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            ydl.download([url])
-
-        mp3_files = list(tmp.glob("*.mp3"))
-        if not mp3_files:
-            audio_files = list(tmp.glob("*.*"))
-            if not audio_files:
+            info = ydl.extract_info(url, download=True)
+            if not info:
                 raise RuntimeError("No audio file downloaded")
-            audio_file = audio_files[0]
-        else:
-            audio_file = mp3_files[0]
+            audio_file = Path(ydl.prepare_filename(info))
+        if not audio_file.is_file():
+            raise RuntimeError("No audio file downloaded")
 
         return _transcribe_audio_file(audio_file)
 

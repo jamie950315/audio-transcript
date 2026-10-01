@@ -19,7 +19,9 @@ use its `venv`. Cloudflare Tunnel exposes
 `GET /health` is public. `POST /transcript` requires `X-API-Key` matching
 `CCSEARCH_API_KEY` in the private `.env`. `OPENROUTER_API_KEY` is used only
 by the audio transcription pipeline. Audio chunks remain 120 seconds with
-up to 16 concurrent requests.
+up to 16 concurrent requests. The downloader keeps the native audio format;
+ffmpeg encodes mono 16 kHz, 48 kbps MP3 and segments it in one pass. Do not
+add separate full-file MP3 conversion or normalization passes before splitting.
 
 ## Connect ChatGPT
 
@@ -111,3 +113,15 @@ They verify authentication, audience/scope/expiry enforcement, PKCE, CSRF,
 concurrent code exchange, refresh rotation/replay/revocation, durable state,
 client authentication methods, and one-copy responses. They never call YouTube
 or OpenRouter.
+
+For audio pipeline changes, also run:
+
+```sh
+venv/bin/python -m unittest -v test_transcription test_mcp
+```
+
+The audio tests use real ffmpeg with synthetic AAC input and fixture provider
+responses. They verify one encoding pass, ordered chunk assembly, output audio
+format, duration validation, and rejection of partial results after failures.
+Live audio transcription tests consume OpenRouter credits; confirm a budget
+before starting a new benchmark.
