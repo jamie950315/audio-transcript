@@ -1,4 +1,6 @@
 .env
+.env.bak-*
+.oauth/
 venv/
 __pycache__/
 *.pyc

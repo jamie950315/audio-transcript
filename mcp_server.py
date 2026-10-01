@@ -3,10 +3,15 @@ import os
 import urllib.error
 import urllib.request
 from pathlib import Path
+from typing import Literal
 
 from mcp.server import MCPServer
+from mcp.server.auth.settings import AuthSettings, ClientRegistrationOptions, RevocationOptions
 from mcp.server.transport_security import TransportSecuritySettings
-from mcp.types import ToolAnnotations
+from mcp.types import CallToolResult, TextContent, ToolAnnotations
+from starlette.middleware.trustedhost import TrustedHostMiddleware
+
+from mcp_auth import OwnerOAuthProvider, OAuthBoundaryMiddleware, PUBLIC_URL, RESOURCE_URL, SCOPE
 
 BASE_DIR = Path(__file__).resolve().parent
 ENV_FILE = BASE_DIR / ".env"
@@ -21,12 +26,25 @@ if ENV_FILE.exists():
 
 API_KEY = os.environ.get("CCSEARCH_API_KEY", "")
 LOCAL_TRANSCRIPT_URL = "http://127.0.0.1:8889/transcript"
+os.umask(0o077)
+auth_provider = OwnerOAuthProvider(Path(os.environ.get("YT_MCP_STATE_DIR", BASE_DIR / ".oauth")))
 
 mcp = MCPServer(
     name="yt-transcript",
     title="YouTube Transcript",
     description="Fetch transcripts from public YouTube videos.",
-    version="1.0.0",
+    version="1.1.0",
+    auth_server_provider=auth_provider,
+    auth=AuthSettings(
+        issuer_url=PUBLIC_URL,
+        resource_server_url=RESOURCE_URL,
+        validate_token_resource=True,
+        required_scopes=[SCOPE],
+        client_registration_options=ClientRegistrationOptions(
+            enabled=True, valid_scopes=[SCOPE], default_scopes=[SCOPE],
+        ),
+        revocation_options=RevocationOptions(enabled=True),
+    ),
     instructions=(
         "Use get_youtube_transcript when the user provides a YouTube URL or video ID "
         "and wants a transcript, captions, lecture notes, or a summary grounded in the video. "
@@ -48,13 +66,14 @@ mcp = MCPServer(
         idempotentHint=True,
         openWorldHint=True,
     ),
+    meta={"securitySchemes": [{"type": "oauth2", "scopes": [SCOPE]}]},
 )
 def get_youtube_transcript(
     url: str,
     lang: str = "zh-Hant",
     timestamps: bool = True,
-    format: str = "text",
-) -> dict:
+    format: Literal["text", "json", "srt"] = "text",
+) -> CallToolResult:
     """Fetch a YouTube transcript from the local transcript API."""
     if not API_KEY:
         raise RuntimeError("CCSEARCH_API_KEY is not configured")
@@ -91,20 +110,32 @@ def get_youtube_transcript(
     except urllib.error.URLError as exc:
         raise RuntimeError(f"Transcript API unavailable: {exc.reason}") from exc
 
-    # Keep the model-facing payload focused while retaining the structured segments.
-    return {
+    metadata = {
         "status": data.get("status"),
         "video_id": data.get("video_id"),
         "title": data.get("title"),
         "language": data.get("language"),
         "needs_translation": data.get("needs_translation"),
         "segment_count": data.get("segment_count"),
-        "transcript": data.get("transcript"),
-        "segments": data.get("segments"),
     }
+    # Explicit results prevent the SDK from serializing the full payload twice.
+    if format == "json":
+        return CallToolResult(
+            content=[TextContent(type="text", text="Transcript segments are in structuredContent.")],
+            structuredContent={**metadata, "segments": data.get("segments")},
+        )
+    return CallToolResult(
+        content=[TextContent(type="text", text=data.get("transcript") or "")],
+        structuredContent=metadata,
+    )
 
 
-if __name__ == "__main__":
+@mcp.custom_route("/oauth/login", methods=["GET", "POST"])
+async def oauth_login(request):
+    return await auth_provider.login(request)
+
+
+def create_http_app():
     security = TransportSecuritySettings(
         allowed_hosts=[
             "127.0.0.1:*",
@@ -115,13 +146,20 @@ if __name__ == "__main__":
         allowed_origins=[
             "https://chatgpt.com",
             "https://chat.openai.com",
+            PUBLIC_URL,
         ],
     )
-    mcp.run(
-        transport="streamable-http",
+    app = mcp.streamable_http_app(
         host="127.0.0.1",
-        port=8894,
         json_response=True,
         stateless_http=True,
         transport_security=security,
     )
+    app.add_middleware(OAuthBoundaryMiddleware, provider=auth_provider)
+    app.add_middleware(TrustedHostMiddleware, allowed_hosts=["127.0.0.1", "localhost", "yt-transcript.0ruka.dev"])
+    return app
+
+
+if __name__ == "__main__":
+    import uvicorn
+    uvicorn.run(create_http_app(), host="127.0.0.1", port=8894)
