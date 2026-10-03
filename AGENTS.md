@@ -2,7 +2,7 @@
 
 - Keep repository content in English. Never commit `.env`, `.oauth/`, secrets,
   credential backups, or runtime data.
-- The live checkout is `/home/jamie/yt-transcript-API` on Pi5. The REST API binds
+- The live checkout is `/home/jamie/audio-transcript` on Pi5. The REST API binds
   to `127.0.0.1:8889`; MCP and OAuth bind to `127.0.0.1:8894`.
 - MCP is a single-owner OAuth service for ChatGPT and hosted Claude apps. Preserve PKCE S256,
   `transcript:read`, the exact resource audience, allowed callbacks, issuer

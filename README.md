@@ -8,11 +8,11 @@ The REST API and authenticated MCP share the transcription pipeline.
 
 | Service | Loopback address | systemd unit |
 | --- | --- | --- |
-| Transcript API | `127.0.0.1:8889` | `yt-transcript.service` |
-| MCP and OAuth | `127.0.0.1:8894` | `yt-transcript-mcp.service` |
+| Transcript API | `127.0.0.1:8889` | `audio-transcript.service` |
+| MCP and OAuth | `127.0.0.1:8894` | `audio-transcript-mcp.service` |
 | PO token provider | `127.0.0.1:4416` | Docker `bgutil-provider` |
 
-The checkout is `/home/jamie/yt-transcript-API` on Pi5. Both Python services
+The checkout is `/home/jamie/audio-transcript` on Pi5. Both Python services
 use its `venv`. Cloudflare Tunnel exposes
 `https://audio-transcript.0ruka.dev`.
 
@@ -146,7 +146,7 @@ In `/etc/cloudflared/config.yml`, routes for this hostname must send `/mcp`,
 OAuth discovery and login will fail if only `/mcp` is routed to the MCP service.
 
 The MCP systemd unit requires the transcript API. After code changes, restart
-`yt-transcript-mcp.service`; also restart `yt-transcript.service` when the API
+`audio-transcript-mcp.service`; also restart `audio-transcript.service` when the API
 changes. Validate Cloudflare ingress before restarting the
 shared tunnel if routing changes.
 
