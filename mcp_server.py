@@ -84,8 +84,8 @@ def _transcript_result(data: dict, metadata: dict, format: str) -> CallToolResul
     # Explicit results prevent the SDK from serializing the full payload twice.
     if format == "json":
         return CallToolResult(
-            content=[TextContent(type="text", text="Transcript segments are in structuredContent.")],
-            structuredContent={**metadata, "segments": data.get("segments")},
+            content=[TextContent(type="text", text=json.dumps(data.get("segments") or [], ensure_ascii=False))],
+            structuredContent=metadata,
         )
     return CallToolResult(
         content=[TextContent(type="text", text=data.get("transcript") or "")],
@@ -113,7 +113,7 @@ def get_youtube_transcript(
     url: str,
     lang: str = "zh-Hant",
     timestamps: bool = True,
-    format: Literal["text", "json", "srt"] = "text",
+    format: Literal["text", "json", "srt"] = "srt",
 ) -> CallToolResult:
     """Fetch a YouTube transcript from the local transcript API."""
     data = _call_api(LOCAL_TRANSCRIPT_URL,
@@ -151,7 +151,7 @@ def get_youtube_transcript(
 )
 def transcribe_audio(
     file: AudioFileInput, language: str = "auto", timestamps: bool = True,
-    format: Literal["text", "json", "srt"] = "text",
+    format: Literal["text", "json", "srt"] = "srt",
 ) -> CallToolResult:
     """Transcribe an uploaded attachment through the shared local API."""
     data = _call_api(LOCAL_AUDIO_URL, {

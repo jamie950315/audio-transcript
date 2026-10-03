@@ -380,11 +380,10 @@ class MCPContracts(unittest.TestCase):
             self.assertFalse(result.get("isError", False), result)
             self.assertEqual(json.dumps(result).count(MARKER), 1)
             self.assertNotIn("transcript", result["structuredContent"])
+            self.assertNotIn("segments", result["structuredContent"])
+            self.assertIn(MARKER, result["content"][0]["text"])
             if format == "json":
-                self.assertEqual(result["structuredContent"]["segments"][0]["text"], MARKER)
-            else:
-                self.assertNotIn("segments", result["structuredContent"])
-                self.assertIn(MARKER, result["content"][0]["text"])
+                self.assertEqual(json.loads(result["content"][0]["text"])[0]["text"], MARKER)
         before = FixtureAPI.calls
         status, _, result = self.rpc("tools/call", token, {"name": "get_youtube_transcript", "arguments": {"url": "fixture1234", "format": "invalid"}})
         self.assertTrue(result["result"]["isError"])

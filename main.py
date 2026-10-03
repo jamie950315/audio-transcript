@@ -53,7 +53,9 @@ VALID_API_KEY = os.environ.get("CCSEARCH_API_KEY", "")
 OPENROUTER_KEY = os.environ.get("OPENROUTER_API_KEY", "")
 OPENROUTER_TRANSCRIPTION_URL = "https://openrouter.ai/api/v1/audio/transcriptions"
 TRANSCRIPTION_MODEL = "openai/gpt-transcribe"
-TRANSCRIPTION_CHUNK_SECONDS = 120
+TRANSCRIPTION_CHUNK_SECONDS = 30      # target chunk length
+TRANSCRIPTION_CHUNK_MIN_SECONDS = 20  # earliest silence cut
+TRANSCRIPTION_CHUNK_MAX_SECONDS = 45  # hard cut if no silence found
 TRANSCRIPTION_MAX_WORKERS = 16
 
 # YouTube now enforces PO Tokens for some playback/subtitle requests.
@@ -71,7 +73,7 @@ logging.basicConfig(
     level=logging.INFO,
     format="%(asctime)s %(name)s %(levelname)s %(message)s",
 )
-log = logging.getLogger("yt-transcript")
+log = logging.getLogger("audio-transcript")
 
 
 # ── FastAPI App ──────────────────────────────────────────────────────────────
@@ -307,10 +309,14 @@ def _openrouter_transcribe(audio_b64: str, fmt: str = "mp3", language: str = "au
         try:
             with urllib.request.urlopen(req, timeout=120) as resp:
                 result = json.loads(resp.read().decode())
-            text = result.get("text", "")
-            if text.strip():
-                return text.strip()
-            raise RuntimeError(f"Empty transcription response: {json.dumps(result)[:300]}")
+            if "text" not in result:
+                raise RuntimeError(f"Malformed transcription response: {json.dumps(result)[:300]}")
+            text = (result.get("text") or "").strip()
+            if not text:
+                # A silent chunk legitimately transcribes to "" (short silence-cut
+                # chunks make this common); treat it as no speech, not failure.
+                log.info("Empty transcription for chunk (likely silence): %s", json.dumps(result.get("usage"))[:200])
+            return text
         except urllib.error.HTTPError as e:
             body = e.read().decode(errors="replace")[:500]
             last_error = RuntimeError(f"OpenRouter HTTP {e.code}: {body}")
@@ -350,22 +356,62 @@ def _get_duration(path: Path) -> float:
     return duration
 
 
+_SENTENCE_SPLIT = re.compile(r"(?<=[!?。！？\n])\s*|(?<=\.)(?!\d)\s*")
+
+
 def _text_to_segments(text: str, start_offset: float, total_dur: float) -> list[dict]:
+    """Split one chunk's text into sentences and spread the chunk duration
+    over them in proportion to their length. gpt-transcribe returns no
+    segment timestamps, so chunk boundaries are the only true anchors;
+    length weighting keeps short interjections from taking a full slot."""
     if not text.strip():
         return []
-    sentences = re.split(r"(?<=[.!?。！？\n])\s*", text.strip())
-    sentences = [s.strip() for s in sentences if s.strip()]
+    sentences = [s.strip() for s in _SENTENCE_SPLIT.split(text.strip()) if s and s.strip()]
     if not sentences:
-        return [{"text": text.strip(), "start": start_offset, "duration": total_dur}]
-    seg_dur = total_dur / len(sentences)
-    return [
-        {
-            "text": s,
-            "start": round(start_offset + i * seg_dur, 3),
-            "duration": round(seg_dur, 3),
-        }
-        for i, s in enumerate(sentences)
-    ]
+        return [{"text": text.strip(), "start": round(start_offset, 3), "duration": round(total_dur, 3)}]
+    weights = [max(len(re.sub(r"\s+", "", s)), 1) for s in sentences]
+    total_w = sum(weights)
+    segs, t = [], start_offset
+    for s, w in zip(sentences, weights):
+        d = total_dur * w / total_w
+        segs.append({"text": s, "start": round(t, 3), "duration": round(d, 3)})
+        t += d
+    return segs
+
+
+def _silence_cut_points(path: Path, duration: float) -> list[float]:
+    """Pick chunk boundaries at silences so each chunk starts on a pause.
+    Target ~TRANSCRIPTION_CHUNK_SECONDS; fall back to a hard cut at
+    TRANSCRIPTION_CHUNK_MAX_SECONDS when no silence is found."""
+    proc = subprocess.run(
+        [
+            "ffmpeg", "-hide_banner", "-nostats", "-protocol_whitelist", "file,pipe",
+            "-format_whitelist", MEDIA_FORMATS, "-i", str(path), "-vn",
+            "-af", "silencedetect=noise=-35dB:d=0.3", "-f", "null", "-",
+        ],
+        capture_output=True, text=True, timeout=300,
+    )
+    silences: list[float] = []
+    start = None
+    for line in proc.stderr.splitlines():
+        m_start = re.search(r"silence_start: (-?[\d.]+)", line)
+        m_end = re.search(r"silence_end: ([\d.]+)", line)
+        if m_start:
+            start = max(float(m_start.group(1)), 0.0)
+        elif m_end and start is not None:
+            silences.append((start + float(m_end.group(1))) / 2)
+            start = None
+
+    cuts: list[float] = []
+    prev = 0.0
+    while duration - prev > TRANSCRIPTION_CHUNK_MAX_SECONDS:
+        lo, hi = prev + TRANSCRIPTION_CHUNK_MIN_SECONDS, prev + TRANSCRIPTION_CHUNK_MAX_SECONDS
+        target = prev + TRANSCRIPTION_CHUNK_SECONDS
+        candidates = [s for s in silences if lo <= s <= hi]
+        cut = min(candidates, key=lambda s: abs(s - target)) if candidates else hi
+        cuts.append(round(cut, 3))
+        prev = cut
+    return cuts
 
 
 def _transcribe_audio_file(audio_path: Path, language: str = "auto") -> list[dict]:
@@ -384,7 +430,7 @@ def _transcribe_audio_file(audio_path: Path, language: str = "auto") -> list[dic
 
         # Allow a small encoder-padding tolerance around the nominal boundary.
         # A 120 s source commonly probes as ~120.02 s after MP3 encoding.
-        if duration <= TRANSCRIPTION_CHUNK_SECONDS + 0.5:
+        if duration <= TRANSCRIPTION_CHUNK_MAX_SECONDS + 0.5:
             compressed = tmp / "normalized.mp3"
             subprocess.run(encode + [str(compressed)], capture_output=True, check=True, timeout=120)
             log.info("Audio preparation: %.2fs source, 1 chunk, %.3fs elapsed", duration, time.monotonic() - started)
@@ -399,10 +445,11 @@ def _transcribe_audio_file(audio_path: Path, language: str = "auto") -> list[dic
         # parallel requests without large payloads.
         chunk_dir = tmp / "chunks"
         chunk_dir.mkdir()
+        cut_points = _silence_cut_points(audio_path, duration)
         subprocess.run(
             encode + [
                 "-f", "segment",
-                "-segment_time", str(TRANSCRIPTION_CHUNK_SECONDS),
+                "-segment_times", ",".join(f"{c:.3f}" for c in cut_points),
                 "-reset_timestamps", "1",
                 str(chunk_dir / "chunk_%04d.mp3"),
             ],
@@ -446,9 +493,11 @@ def _transcribe_audio_file(audio_path: Path, language: str = "auto") -> list[dic
         log.info("Audio transcription: %d chunks, %d workers, %.3fs elapsed", len(chunks), workers, time.monotonic() - transcription_started)
 
         all_segments: list[dict] = []
+        starts = [0.0] + cut_points
         for i in range(len(chunks)):
-            chunk_start = i * TRANSCRIPTION_CHUNK_SECONDS
-            chunk_dur = min(TRANSCRIPTION_CHUNK_SECONDS, max(0, duration - chunk_start))
+            chunk_start = starts[i] if i < len(starts) else starts[-1]
+            chunk_end = starts[i + 1] if i + 1 < len(starts) else duration
+            chunk_dur = max(0.0, chunk_end - chunk_start)
             all_segments.extend(_text_to_segments(results[i], chunk_start, chunk_dur))
         return all_segments
 

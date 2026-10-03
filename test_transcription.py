@@ -58,6 +58,7 @@ class AudioPreparation(unittest.TestCase):
             return f"Chunk {payload_indexes[audio]}."
 
         with patch.object(main.subprocess, "run", side_effect=run) as commands, \
+                patch.object(main, "_silence_cut_points", return_value=[120.0, 240.0]), \
                 patch.object(main, "_openrouter_transcribe", side_effect=transcribe):
             segments = main._transcribe_audio_file(self.long)
         self.assertEqual(len([call for call in commands.call_args_list if call.args[0][0] == "ffmpeg"]), 1)
@@ -101,6 +102,42 @@ class AudioPreparation(unittest.TestCase):
                     patch.object(main.subprocess, "run", return_value=subprocess.CompletedProcess([], 0, stdout=value)):
                 with self.assertRaisesRegex(RuntimeError, "Cannot determine audio duration"):
                     main._get_duration(self.short)
+
+
+
+class SegmentTiming(unittest.TestCase):
+    def test_sentence_split_keeps_decimals(self):
+        segs = main._text_to_segments("電壓是 0.3，所以 Vi 等於 0.673。對不對？Done. Next!", 0, 10)
+        self.assertEqual([s["text"] for s in segs],
+                         ["電壓是 0.3，所以 Vi 等於 0.673。", "對不對？", "Done.", "Next!"])
+
+    def test_duration_is_weighted_by_length_and_fills_chunk(self):
+        segs = main._text_to_segments("短。" + "這是一個比較長很多的句子。", 100, 10)
+        self.assertLess(segs[0]["duration"], segs[1]["duration"])
+        self.assertEqual(segs[0]["start"], 100)
+        self.assertAlmostEqual(segs[-1]["start"] + segs[-1]["duration"], 110, places=2)
+
+    def test_empty_text_gives_no_segments(self):
+        self.assertEqual(main._text_to_segments("", 0, 30), [])
+
+    def _cuts(self, stderr, duration):
+        fake = type("R", (), {"stderr": stderr})()
+        with patch.object(main.subprocess, "run", return_value=fake):
+            return main._silence_cut_points(Path("x.mp3"), duration)
+
+    def test_cut_points_prefer_silence_near_target(self):
+        stderr = "\n".join([
+            "[silencedetect] silence_start: 21.0", "[silencedetect] silence_end: 21.4 | d",
+            "[silencedetect] silence_start: 29.8", "[silencedetect] silence_end: 30.4 | d",
+            "[silencedetect] silence_start: 61.0", "[silencedetect] silence_end: 61.2 | d",
+        ])
+        self.assertEqual(self._cuts(stderr, 100), [30.1, 61.1])
+
+    def test_cut_points_hard_cut_without_silence(self):
+        self.assertEqual(self._cuts("", 100), [45.0, 90.0])
+
+    def test_short_audio_has_no_cuts(self):
+        self.assertEqual(self._cuts("", 40), [])
 
 
 if __name__ == "__main__":
